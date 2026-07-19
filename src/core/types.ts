@@ -28,6 +28,10 @@ export type ProgressMetrics = {
 
   memory?: number;
   cpu?: number;
+  heapUsed?: number;
+  heapTotal?: number;
+  external?: number;
+  arrayBuffers?: number;
   eventLoopLag?: number;
   ttfb?: number;
 };

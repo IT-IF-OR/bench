@@ -8,11 +8,11 @@ export const hyperttpRunner: Runner = {
   name: "hyperttp",
   tool: "custom",
 
-  run: (ctx, onProgress) => {
+  run: async (ctx, onProgress) => {
     const client = new HyperClient({
       network: {
         maxConcurrent: ctx.concurrency,
-        keepAliveTimeout: 60_000,
+        keepAliveTimeout: ctx.durationMs,
         pipelining: 1,
       },
       interceptors: { enabled: false },
@@ -23,24 +23,22 @@ export const hyperttpRunner: Runner = {
       metrics: { enabled: false },
     });
 
-    return runBenchmark({
+    const result = await runBenchmark({
       name: "hyperttp",
       tool: "custom",
-
       client,
-
       concurrency: ctx.concurrency,
       requests: ctx.requests,
       baseUrl: ctx.baseUrl,
       endpoint: ctx.endpoint,
-
-      request: (c, url) => c.get(url),
-
+      request: (c, url) => c.get(`${url}?uuid=${crypto.randomUUID()}`),
       consume: consumeResponseBody,
-
       getMetrics: getSystemMetrics,
-
       onProgress,
     });
+
+    await (client as any).destroy?.();
+
+    return result;
   },
 };

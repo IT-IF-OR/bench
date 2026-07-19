@@ -1,7 +1,7 @@
 import { BenchResult, ProgressMetrics } from "../core/types.js";
 import { c } from "../utils/ui.js";
 
-type PanelType = "rps" | "latency" | "p99" | "errors" | "memory" | "cpu";
+type PanelType = "rps" | "latency" | "p99" | "errors" | "memory" | "heapUsed" | "external" | "arrayBuffers" | "cpu";
 
 class FastSeries {
   public readonly values: Float64Array;
@@ -111,6 +111,9 @@ export class GrafanaPro {
     p99: { type: "p99", title: "P99 LATENCY", series: new Map() },
     errors: { type: "errors", title: "ERROR RATE", series: new Map() },
     memory: { type: "memory", title: "MEMORY (MB)", series: new Map() },
+    heapUsed: { type: "heapUsed", title: "HEAP USED (MB)", series: new Map() },
+    external: { type: "external", title: "EXTERNAL (MB)", series: new Map() },
+    arrayBuffers: { type: "arrayBuffers", title: "ARRAY BUFFERS (MB)", series: new Map() },
     cpu: { type: "cpu", title: "CPU %", series: new Map() },
   };
 
@@ -128,7 +131,16 @@ export class GrafanaPro {
     this.update("latency", name, m.avg);
     this.update("errors", name, m.errors);
     if (m.memory != null) this.update("memory", name, m.memory);
+    if (m.heapUsed != null) this.update("heapUsed", name, m.heapUsed);
+    if (m.external != null) this.update("external", name, m.external);
+    if (m.arrayBuffers != null) this.update("arrayBuffers", name, m.arrayBuffers);
     if (m.cpu != null) this.update("cpu", name, m.cpu);
+  }
+
+  resetSeries(name: string) {
+    for (const panel of Object.values(this.panels)) {
+      panel.series.delete(name);
+    }
   }
 
   applyResult(result: BenchResult) {

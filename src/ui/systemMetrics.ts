@@ -26,5 +26,9 @@ export function getSystemMetrics() {
   return {
     memory: memoryMB,
     cpu: cpuPercent,
+    heapUsed: mem.heapUsed / 1024 / 1024,
+    heapTotal: mem.heapTotal / 1024 / 1024,
+    external: mem.external / 1024 / 1024,
+    arrayBuffers: mem.arrayBuffers / 1024 / 1024,
   };
 }

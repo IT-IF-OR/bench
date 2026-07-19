@@ -5,7 +5,10 @@ import { bunFetchRunner } from "./src/runners/bun.js";
 import { undiciRunner } from "./src/runners/undici.js";
 import { hyperttpRunner } from "./src/runners/hyperttp.js";
 import { hyperttpCoreRunner } from "./src/runners/hyperttpCore.js";
-import { GrafanaController, NoopGrafanaController } from "./src/tui/grafanaController.js";
+import {
+  GrafanaController,
+  NoopGrafanaController,
+} from "./src/tui/grafanaController.js";
 import { printMarkdownTable } from "./src/ui/printMarkdownTable.js";
 import { axiosRunner } from "./src/runners/axios.js";
 import { gotRunner } from "./src/runners/got.js";
@@ -20,12 +23,57 @@ const runtimeName = isBun ? "Bun" : "Node.js";
 const runtimeVersion = isBun ? Bun.version : process.version;
 
 async function main() {
+  const allRunners = [
+    bunFetchRunner,
+    undiciRunner,
+    hyperttpCoreRunner,
+    hyperttpRunner,
+    axiosRunner,
+    gotRunner,
+    kyRunner,
+    nodeFetchRunner,
+    superagentRunner,
+    requestRunner,
+  ];
+
+  if (process.env.IS_CHILD === "true") {
+    const targetName = process.env.RUNNER_NAME;
+    const runner = allRunners.find((r) => r.name === targetName);
+
+    if (!runner) {
+      console.error(`[Worker] Не удалось найти раннер с именем: "${targetName}"`);
+      process.exit(1);
+    }
+
+    const ctx: BenchContext = {
+      baseUrl: process.env.BENCH_URL ?? "http://127.0.0.1:3001",
+      endpoint: "/json",
+      requests: 200_000,
+      concurrency: 1000,
+      durationMs: 120_000,
+    };
+
+    if (!isBun) {
+      const { Agent, setGlobalDispatcher } = await import("undici");
+      setGlobalDispatcher(
+        new Agent({
+          connections: ctx.concurrency,
+          pipelining: 1,
+          keepAliveTimeout: 60_000,
+        }),
+      );
+    }
+
+    await runSuite(ctx, [runner]);
+    return;
+  }
+
   const ctx: BenchContext = {
     baseUrl: process.env.BENCH_URL ?? "http://127.0.0.1:3001",
     endpoint: "/json",
     requests: 20_000,
-    concurrency: 200,
-    durationMs: 20_000,
+    concurrency: 100,
+    durationMs: 60_000,
   };
 
   if (!isBun) {
@@ -34,7 +82,7 @@ async function main() {
       new Agent({
         connections: ctx.concurrency,
         pipelining: 1,
-        keepAliveTimeout: 60_000,
+        keepAliveTimeout: ctx.durationMs,
       }),
     );
   }
@@ -59,7 +107,10 @@ async function main() {
   ];
 
   try {
-    tui.setHeader(`${await core.getTransportName()}`, `${runtimeName} ${runtimeVersion}`);
+    tui.setHeader(
+      `${await core.getTransportName()}`,
+      `${runtimeName} ${runtimeVersion}`,
+    );
     tui.setProgress(0, runners.length, "INIT");
     tui.render();
 
@@ -67,11 +118,14 @@ async function main() {
 
     for (let i = 0; i < runners.length; i++) {
       const runner = runners[i];
+      tui.resetSeries(runner.name);
       tui.setProgress(i, runners.length, runner.name);
 
       if (tui instanceof NoopGrafanaController) {
         console.log(`\n🚀 Starting benchmark for: ${runner.name}...`);
       }
+
+      process.env.RUNNER_NAME = runner.name;
 
       const [result] = await runSuite(ctx, [runner], (r, m) => {
         tui.pushMetric(r.name, m);
@@ -103,7 +157,6 @@ async function main() {
 
     tui.setProgress(runners.length, runners.length, "DONE");
     tui.render();
-
     tui.dispose();
 
     console.log("\n");

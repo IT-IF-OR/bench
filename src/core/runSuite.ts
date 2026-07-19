@@ -1,8 +1,6 @@
-import { computeStats } from "./computeStats.js";
-import { runLoad } from "./runLoad.js";
+import { fork } from "child_process";
 import type {
   BenchResult,
-  ProgressCallback,
   BenchContext,
   Runner,
   ProgressMetrics,
@@ -18,99 +16,20 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-let lastCpu = process.cpuUsage();
-let lastTime = process.hrtime.bigint();
-
-export function getSystemMetrics() {
-  const mem = process.memoryUsage();
-  const memoryMB = mem.rss / 1024 / 1024;
-
-  const currentTime = process.hrtime.bigint();
-  const currentCpu = process.cpuUsage();
-
-  const cpuDiff = {
-    user: currentCpu.user - lastCpu.user,
-    system: currentCpu.system - lastCpu.system,
-  };
-
-  const timeDiffNs = currentTime - lastTime;
-  const cpuTimeUs = cpuDiff.user + cpuDiff.system;
-  const timeDiffUs = Number(timeDiffNs) / 1000;
-
-  const cpuPercent = timeDiffUs > 0 ? Math.min(100, (cpuTimeUs / timeDiffUs) * 100) : 0;
-
-  lastCpu = currentCpu;
-  lastTime = currentTime;
-
+function memSnapshot() {
+  const m = process.memoryUsage();
   return {
-    memory: memoryMB,
-    cpu: cpuPercent,
+    rss: m.rss / 1024 / 1024,
+    heapUsed: m.heapUsed / 1024 / 1024,
+    external: m.external / 1024 / 1024,
+    arrayBuffers: m.arrayBuffers / 1024 / 1024,
   };
 }
 
-export function resetSystemMetrics() {
-  lastCpu = process.cpuUsage();
-  lastTime = process.hrtime.bigint();
-}
-
-export async function runBenchmark<TClient, TRes>(opts: {
-  name: string;
-  tool: BenchResult["tool"];
-  client: TClient;
-  request: (client: TClient, url: string) => Promise<TRes>;
-  consume?: (res: TRes) => Promise<void>;
-  concurrency: number;
-  requests: number;
-  baseUrl: string;
-  endpoint: string;
-  onProgress?: ProgressCallback;
-  getMetrics?: () => any;
-}): Promise<BenchResult> {
-  const start = performance.now();
-  let completed = 0;
-  let errors = 0;
-  const samples: number[] = [];
-  const url = `${opts.baseUrl}${opts.endpoint}`;
-
-  const reportEvery = 200;
-  let lastReport = start;
-
-  await runLoad(opts.concurrency, opts.requests, async () => {
-    const t0 = performance.now();
-    try {
-      const res = await opts.request(opts.client, url);
-      await opts.consume?.(res);
-      samples.push(performance.now() - t0);
-      completed++;
-    } catch {
-      errors++;
-    }
-
-    const now = performance.now();
-    if (now - lastReport > reportEvery) {
-      const elapsed = (now - start) / 1000;
-      opts.onProgress?.({
-        rps: completed / elapsed,
-        avg: samples.reduce((a, b) => a + b, 0) / (samples.length || 1),
-        errors,
-        completed,
-        ...opts.getMetrics?.(),
-      });
-      lastReport = now;
-    }
-  });
-
-  const durationMs = performance.now() - start;
-  const stats = computeStats(samples);
-
-  return {
-    tool: opts.tool,
-    name: opts.name,
-    rps: completed / (durationMs / 1000),
-    ...stats,
-    errors,
-    durationMs,
-  };
+function fmtDelta(after: number, before: number) {
+  const d = after - before;
+  const sign = d >= 0 ? "+" : "";
+  return `${sign}${d.toFixed(1)}`;
 }
 
 export async function runSuite(
@@ -118,22 +37,61 @@ export async function runSuite(
   runners: Runner[],
   onProgress?: (runner: Runner, m: ProgressMetrics) => void,
 ): Promise<BenchResult[]> {
-  const results: BenchResult[] = [];
-  const RUNS = 5;
+  if (process.env.IS_CHILD === "true") {
+    const runnerIndex = parseInt(process.env.RUNNER_INDEX || "0", 10);
+    const runner = runners[runnerIndex];
 
-  for (const runner of runners) {
+    if (!runner) {
+      process.exit(1);
+    }
+
+    const RUNS = 5;
+    const WARMUP_REQUESTS = 1000;
+
+    await runner.run({ ...ctx, requests: WARMUP_REQUESTS }, () => {});
+
+    if (typeof globalThis.gc === "function") globalThis.gc();
+    const baseline = memSnapshot();
+
+    process.send!({
+      type: "LOG",
+      text: `\n▸ ${runner.name} — ${RUNS} runs (baseline RSS=${baseline.rss.toFixed(1)} MB)`,
+    });
+
     const rpsRuns: number[] = [];
     const avgRuns: number[] = [];
     const p50Runs: number[] = [];
     const p90Runs: number[] = [];
     const p99Runs: number[] = [];
-    const errorRuns: number[] = []; // Сбор ошибок
+    const errorRuns: number[] = [];
 
     for (let i = 0; i < RUNS; i++) {
-      resetSystemMetrics();
+      if (typeof globalThis.gc === "function") globalThis.gc();
+      const before = memSnapshot();
 
       const core = await runner.run(ctx, (m) => {
-        onProgress?.(runner, m);
+        process.send!({
+          type: "PROGRESS",
+          metrics: {
+            ...m,
+            memory: m.memory != null ? m.memory - baseline.rss : undefined,
+            heapUsed: m.heapUsed != null ? m.heapUsed - baseline.heapUsed : undefined,
+            external: m.external != null ? m.external - baseline.external : undefined,
+            arrayBuffers: m.arrayBuffers != null ? m.arrayBuffers - baseline.arrayBuffers : undefined,
+          },
+        });
+      });
+
+      if (typeof globalThis.gc === "function") globalThis.gc();
+      const after = memSnapshot();
+
+      process.send!({
+        type: "LOG",
+        text: `  Run ${i + 1}: RSS Δ${fmtDelta(after.rss, before.rss)} (from baseline ${fmtDelta(after.rss, baseline.rss)}) MB | ` +
+              `heap Δ${fmtDelta(after.heapUsed, before.heapUsed)} | ` +
+              `external Δ${fmtDelta(after.external, before.external)} | ` +
+              `arrayBuf Δ${fmtDelta(after.arrayBuffers, before.arrayBuffers)} | ` +
+              `rps=${core.rps.toFixed(0)}`,
       });
 
       rpsRuns.push(core.rps);
@@ -141,24 +99,66 @@ export async function runSuite(
       p50Runs.push(core.p50);
       p90Runs.push(core.p90);
       p99Runs.push(core.p99);
-      errorRuns.push(core.errors); // Сохраняем ошибки прогона
+      errorRuns.push(core.errors);
 
       await sleep(300);
     }
 
-    results.push({
-      name: runner.name,
-      tool: runner.tool,
-      rps: median(rpsRuns),
-      avg: median(avgRuns),
-      p50: median(p50Runs),
-      p90: median(p90Runs),
-      p99: median(p99Runs),
-      min: Math.min(...rpsRuns),
-      max: Math.max(...rpsRuns),
-      stddev: 0,
-      errors: Math.max(...errorRuns), // Выводим максимальное число ошибок из ранов
-      durationMs: 0,
+    process.send!({
+      type: "RESULT",
+      result: {
+        name: runner.name,
+        tool: runner.tool,
+        rps: median(rpsRuns),
+        avg: median(avgRuns),
+        p50: median(p50Runs),
+        p90: median(p90Runs),
+        p99: median(p99Runs),
+        min: Math.min(...rpsRuns),
+        max: Math.max(...rpsRuns),
+        stddev: 0,
+        errors: Math.max(...errorRuns),
+        durationMs: 0,
+      },
+    });
+
+    process.exit(0);
+  }
+
+  const results: BenchResult[] = [];
+
+  for (let i = 0; i < runners.length; i++) {
+    const runner = runners[i];
+
+    await new Promise<void>((resolve, reject) => {
+      const child = fork(process.argv[1]!, [], {
+        execArgv: Array.from(new Set([...process.execArgv, "--expose-gc"])),
+        env: {
+          ...process.env,
+          IS_CHILD: "true",
+          RUNNER_INDEX: i.toString(),
+        },
+      });
+
+      child.on("message", (msg: any) => {
+        if (msg.type === "LOG") {
+          console.log(msg.text);
+        } else if (msg.type === "PROGRESS") {
+          onProgress?.(runner, msg.metrics);
+        } else if (msg.type === "RESULT") {
+          results.push(msg.result);
+        }
+      });
+
+      child.on("exit", (code) => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`Runner [${runner.name}] crashed with exit code ${code}`));
+        }
+      });
+
+      child.on("error", reject);
     });
   }
 

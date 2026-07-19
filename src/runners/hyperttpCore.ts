@@ -8,21 +8,19 @@ export const hyperttpCoreRunner: Runner = {
   name: "@hyperttp/core",
   tool: "custom",
 
-  run: (ctx, onProgress) => {
+  run: async (ctx, onProgress) => {
     const client = new HyperCore({
       network: {
         maxConcurrent: ctx.concurrency,
-        keepAliveTimeout: 60_000,
+        keepAliveTimeout: ctx.durationMs,
         pipelining: 1,
-        // Перебиваем дефолтный Accept-Encoding для бенчмарков,
-        // чтобы мерить чистый сетевой оверхед и парсинг, а не скорость JS-зиппера
         headers: {
           "accept-encoding": "identity",
         },
-      },
+      }
     });
 
-    return runBenchmark({
+    const result = await runBenchmark({
       name: "@hyperttp/core",
       tool: "custom",
       client,
@@ -30,12 +28,14 @@ export const hyperttpCoreRunner: Runner = {
       requests: ctx.requests,
       baseUrl: ctx.baseUrl,
       endpoint: ctx.endpoint,
-      request: (c, url) => c.get(url),
-      // Убедитесь, что consumeResponseBody умеет вызывать .arrayBuffer() / .text()
-      // у вашего HyperHttpResponse, а не только у нативного Response
+      request: (c, url) => c.get({ url: url }),
       consume: consumeResponseBody,
       getMetrics: getSystemMetrics,
       onProgress,
     });
+
+    await (client as any).destroy?.();
+
+    return result;
   },
 };

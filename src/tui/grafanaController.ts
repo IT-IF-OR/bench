@@ -7,6 +7,7 @@ export class NoopGrafanaController {
   render() {}
   pushMetric() {}
   pushResult() {}
+  resetSeries() {}
   dispose() {}
 }
 
@@ -58,6 +59,10 @@ export class GrafanaController {
 
   pushResult(result: BenchResult) {
     this.queue.push(() => this.engine.applyResult(result));
+  }
+
+  resetSeries(name: string) {
+    this.queue.push(() => this.engine.resetSeries(name));
   }
 
   setHeader(t: string, s?: string) {
